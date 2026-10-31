@@ -92,12 +92,29 @@ function unlinkFieldsInParagraph(paragraph) {
   }
 }
 
+/**
+ * Text used to locate the target paragraph. Targets are either a plain string or a descriptor
+ * returned by inspection (`exactText`/`text`); descriptors addressed only by id, index or capture
+ * carry no text and are left to the library.
+ */
+export function getOperationTargetText(operation) {
+  const target = operation?.target;
+  if (typeof target === "string") return target;
+  if (target && typeof target === "object") {
+    const text = target.exactText ?? target.text;
+    return typeof text === "string" ? text : "";
+  }
+  return "";
+}
+
+const PREPROCESSED_OPERATION_TYPES = new Set(["redline", "replace"]);
+
 export function preprocessDocumentXmlForOperation(documentXml, operation) {
-  if (String(operation?.type || "").toLowerCase() !== "redline") {
+  if (!PREPROCESSED_OPERATION_TYPES.has(String(operation?.type || "").toLowerCase())) {
     return String(documentXml || "");
   }
 
-  const targetText = String(operation?.target || "");
+  const targetText = getOperationTargetText(operation);
   if (!targetText.trim()) {
     return String(documentXml || "");
   }

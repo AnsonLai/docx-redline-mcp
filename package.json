@@ -1,17 +1,20 @@
 {
   "name": "docx-redline-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "bin": {
     "docx-redline-mcp": "./src/index.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
   },
   "scripts": {
     "test": "node --test",
     "start": "node ./src/index.js"
   },
   "dependencies": {
-    "@ansonlai/docx-redline-js": "^0.1.4",
+    "@ansonlai/docx-redline-js": "0.11.1",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@xmldom/xmldom": "^0.8.10",
     "jszip": "^3.10.1",
