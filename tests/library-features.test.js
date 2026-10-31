@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createToolHandlers } from "../src/server.js";
-import { OperationFailedError } from "../src/lib/operation-service.js";
+import { OperationFailedError } from "../src/lib/errors.js";
 import { writeDocxFixture } from "./helpers/fixtures.js";
 
 async function openFixture(options, name = "fixture.docx") {
@@ -37,7 +37,7 @@ test("open_docx summary covers the whole document, not just a page", async () =>
     author: "Late Reviewer",
     operation: { type: "redline", target: "Beta.", modified: "Beta changed." }
   });
-  await handlers.saveDocx({ handle });
+  await handlers.saveDocx({ handle, inPlace: true });
 
   const reopened = await handlers.openDocx({ path: filePath });
   assert.deepEqual(reopened.summary.counts, { paragraphs: 3, revisedParagraphs: 1, comments: 1 });
@@ -57,13 +57,17 @@ test("inspect_document returns compact, targetable paragraphs and filters by sea
   assert.equal(inspection.selection.totalMatches, 1);
   assert.equal(inspection.paragraphs.length, 3);
   const match = inspection.paragraphs.find(paragraph => /terminate/.test(paragraph.exactText));
-  assert.ok(match.fingerprint);
+  assert.match(match.target, /^T\d+$/);
+  assert.equal(match.fingerprint, undefined, "machine coordinates stay behind the handle");
+  assert.equal(match.paragraphId, undefined);
   assert.equal(match.segments, undefined, "segments are omitted for paragraphs without revisions");
   assert.equal(match.text, undefined, "text duplicating exactText is omitted");
   assert.deepEqual(inspection.headersFooters, []);
 
   const full = await handlers.inspectDocument({ handle, search: "terminate", compact: false });
   assert.ok(full.paragraphs[0].segments);
+  assert.ok(full.paragraphs[0].fingerprint);
+  assert.equal(full.paragraphs[0].target, match.target, "the same paragraph keeps its handle");
 });
 
 test("inspect_document pages results with a default limit", async () => {
@@ -133,7 +137,7 @@ test("apply_operations reports per-operation results, receipts and the new revis
   });
 
   assert.equal(applied.status, "ok");
-  assert.equal(applied.complete, true);
+  assert.equal(applied.completion, true);
   assert.equal(applied.dirty, true);
   assert.equal(applied.results.length, 2);
   assert.deepEqual(applied.results.map(result => result.index), [1, 2]);
@@ -180,7 +184,7 @@ test("apply_operations with atomic false keeps the operations that succeeded", a
   });
 
   assert.equal(applied.status, "partial");
-  assert.equal(applied.complete, false);
+  assert.equal(applied.completion, false);
   assert.equal(applied.hasChanges, true);
   assert.deepEqual(applied.results.map(result => result.status), ["applied", "error"]);
   assert.match(await documentXml(handlers, handle), /w:(ins|del)/);

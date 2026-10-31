@@ -1,4 +1,5 @@
 import { openSessionDocument } from "../lib/operation-service.js";
+import { registerParagraph } from "../lib/target-registry.js";
 
 const DEFAULT_LIMIT = 100;
 
@@ -18,29 +19,29 @@ const INSPECT_OPTION_KEYS = Object.freeze([
 ]);
 
 /**
- * Drops fields that repeat other fields so an inspection stays small enough for an agent to read:
- * `text`/`excerpt` mirror `exactText`, and `segments` only matter when a paragraph has revisions.
+ * What an agent needs to read and cite a paragraph. The machine coordinates (`paragraphId`,
+ * `fingerprint`, `P12`-style refs) stay behind the handle; `compact: false` returns them.
  */
-function compactParagraph(paragraph) {
-  const {
-    text,
-    excerpt,
-    segments,
-    structuralReferences,
-    revisionAuthors,
-    commentIds,
-    ...rest
-  } = paragraph;
-  const compact = { ...rest };
-  if (text !== undefined && text !== paragraph.exactText) compact.text = text;
-  if (excerpt !== undefined && excerpt !== paragraph.exactText) compact.excerpt = excerpt;
+function compactParagraph(paragraph, target) {
+  const compact = {
+    target,
+    index: paragraph.index,
+    exactText: paragraph.exactText,
+    humanReference: paragraph.humanReference,
+    ...(paragraph.provision ? { provision: paragraph.provision } : {}),
+    ...(paragraph.nearestHeading ? { nearestHeading: paragraph.nearestHeading } : {}),
+    ...(paragraph.headingLevel ? { headingLevel: paragraph.headingLevel } : {}),
+    inTable: paragraph.inTable,
+    ...(paragraph.table ? { table: paragraph.table } : {}),
+    ...(paragraph.list ? { list: paragraph.list } : {}),
+    hasRevisions: paragraph.hasRevisions
+  };
   if (paragraph.hasRevisions) {
-    compact.segments = segments;
-    compact.revisionAuthors = revisionAuthors;
+    compact.revisionAuthors = paragraph.revisionAuthors;
+    compact.segments = paragraph.segments;
   }
-  if (Array.isArray(commentIds) && commentIds.length > 0) compact.commentIds = commentIds;
-  if (Array.isArray(structuralReferences) && structuralReferences.length > 0) {
-    compact.structuralReferences = structuralReferences;
+  if (Array.isArray(paragraph.commentIds) && paragraph.commentIds.length > 0) {
+    compact.commentIds = paragraph.commentIds;
   }
   return compact;
 }
@@ -72,13 +73,16 @@ export function createInspectDocumentHandler({ getSession }) {
     }
 
     const { revisionToken: _documentRevision, ...rest } = inspection;
+    const paragraphs = (inspection.paragraphs || []).map(paragraph => {
+      const target = registerParagraph(session.targets, paragraph, packageRevision.value);
+      return compact === false ? { target, ...paragraph } : compactParagraph(paragraph, target);
+    });
+
     return {
       handle: session.handle,
       packageRevision,
       ...rest,
-      paragraphs: compact === false
-        ? inspection.paragraphs
-        : (inspection.paragraphs || []).map(compactParagraph),
+      paragraphs,
       headersFooters: compact === false
         ? inspection.headersFooters
         : (inspection.headersFooters || []).map(compactHeaderFooter)

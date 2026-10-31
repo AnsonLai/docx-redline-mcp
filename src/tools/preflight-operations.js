@@ -1,3 +1,5 @@
+import { expandOperationHandles } from "../lib/edit-translator.js";
+import { resolveHandle } from "../lib/target-registry.js";
 import {
   DEFAULT_AUTHOR,
   isMaintenanceOperation,
@@ -28,7 +30,9 @@ export function createPreflightOperationsHandler({ getSession }) {
     const document = await openSessionDocument(session);
     const effectiveOptions = resolveApplyOptions(options);
     const resolvedAuthor = author || DEFAULT_AUTHOR;
-    const preflight = document.preflight(list, resolvedAuthor, effectiveOptions);
+    const revision = document.getRevisionToken().value;
+    const expanded = expandOperationHandles(list, name => resolveHandle(session.targets, name, revision));
+    const preflight = document.preflight(expanded, resolvedAuthor, effectiveOptions);
 
     return {
       handle: session.handle,

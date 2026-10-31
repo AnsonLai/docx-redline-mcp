@@ -77,7 +77,7 @@ test("opens, edits, and saves a docx through the tool handlers", async () => {
   });
   assert.equal(applied.dirty, true);
 
-  const saved = await handlers.saveDocx({ handle: opened.handle });
+  const saved = await handlers.saveDocx({ handle: opened.handle, inPlace: true });
   assert.equal(saved.savedPath, filePath);
   assert.equal(saved.dirty, false);
 

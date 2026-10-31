@@ -1,5 +1,5 @@
-import { readFile, writeFile, rename, unlink } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { access, readFile, writeFile, rename, unlink } from "node:fs/promises";
+import { basename, dirname, extname, join, resolve } from "node:path";
 import JSZip from "jszip";
 import { listPartEntries } from "./part-utils.js";
 import { assertXmlString, isXmlPartPath, isWritableXmlPartPath } from "./xml-utils.js";
@@ -96,4 +96,31 @@ export async function saveDocxSession(session, outputPath = session.sourcePath) 
     await unlink(tempPath).catch(() => {});
     throw error;
   }
+}
+
+async function exists(filePath) {
+  try {
+    await access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Where a save goes when the caller does not choose: a sibling `<name>.reviewed.docx` that never
+ * replaces an existing file, so the source document is not overwritten unless that is requested.
+ */
+export async function deriveOutputPath(sourcePath) {
+  const directoryPath = dirname(sourcePath);
+  const stem = basename(sourcePath, extname(sourcePath));
+  let candidate = join(directoryPath, `${stem}.reviewed.docx`);
+  for (let attempt = 2; await exists(candidate); attempt += 1) {
+    candidate = join(directoryPath, `${stem}.reviewed-${attempt}.docx`);
+  }
+  return candidate;
+}
+
+export function isSamePath(left, right) {
+  return resolve(String(left)) === resolve(String(right));
 }

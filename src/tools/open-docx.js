@@ -1,5 +1,6 @@
 import { stat } from "node:fs/promises";
 import { createDocxSessionFromPath } from "../lib/docx-package.js";
+import { getLibraryCompatibility } from "../lib/compatibility.js";
 import { openSessionDocument } from "../lib/operation-service.js";
 
 const MAX_REVISED_PARAGRAPHS = 1_000_000;
@@ -76,6 +77,7 @@ export function createOpenDocxHandler({ store }) {
       metadata: session.metadata,
       packageRevision,
       summary,
+      library: getLibraryCompatibility(),
       parts: docxSession.parts
     };
   };

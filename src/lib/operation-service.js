@@ -6,6 +6,7 @@ import {
   validateRevisionToken
 } from "@ansonlai/docx-redline-js";
 import { openDocx } from "@ansonlai/docx-redline-js/node";
+import { OperationFailedError, describeError } from "./errors.js";
 import { validateSessionPackage } from "./package-validation.js";
 import { preprocessDocumentXmlForOperation } from "./redline-preprocess.js";
 
@@ -44,18 +45,6 @@ const FORWARDED_APPLY_OPTIONS = Object.freeze([
   "verifyRevisionFidelity"
 ]);
 
-/**
- * Thrown when an apply request fails. `payload` is the structured failure (error code, recovery
- * guidance, per-operation results, retry plan) so MCP clients can follow `error.recovery`.
- */
-export class OperationFailedError extends Error {
-  constructor(message, payload) {
-    super(message);
-    this.name = "OperationFailedError";
-    this.payload = payload;
-  }
-}
-
 export function isMaintenanceOperation(operation) {
   return MAINTENANCE_TYPE_SET.has(operationType(operation));
 }
@@ -83,20 +72,27 @@ export async function openSessionDocument(session) {
   return openDocx(bytes);
 }
 
-export function describeError(error) {
-  if (!error) return "Operation failed";
-  const code = error.code ? `${error.code}: ` : "";
-  return `${code}${error.message || "Operation failed"}`;
+function failureMessage(payload) {
+  return describeError(payload.error);
 }
 
-function failureMessage(payload) {
-  const failedResult = (payload.results || []).find(result => result?.status === "error" && result.error);
-  const primary = payload.error || failedResult?.error;
-  const base = describeError(primary);
-  if (failedResult && payload.error && failedResult.error !== payload.error) {
-    return `${base} (operation ${failedResult.index}: ${describeError(failedResult.error)})`;
-  }
-  return base;
+/**
+ * The error an agent should act on. A batch failure is reported by the library as a generic
+ * BATCH_OPERATION_FAILED whose recovery advice says nothing about the real cause, so the failing
+ * operation's own error is promoted. A refusal that needs the user's authorization wins, because
+ * continuing past it is never safe.
+ */
+export function chooseActionableError(results, batchError) {
+  const failures = (results || []).filter(result => result?.status === "error" && result.error);
+  if (failures.length === 0) return batchError || null;
+  const chosen = failures.find(result => result.error.recovery?.requiresUserAuthorization) || failures[0];
+  return {
+    ...chosen.error,
+    message: failures.length > 1 && chosen === failures[0]
+      ? `${chosen.error.message} (${failures.length} operations failed; see each result)`
+      : chosen.error.message,
+    operationIndex: chosen.index
+  };
 }
 
 function summarizeReceipt(receipt, offset) {
@@ -230,7 +226,7 @@ function maintenanceResult(index, operation, outcome) {
 function revisionMismatchPayload(code, message, extra = {}) {
   return {
     status: "error",
-    complete: false,
+    completion: false,
     hasChanges: false,
     rolledBack: true,
     error: {
@@ -300,7 +296,7 @@ function preprocessOperations(document, operations) {
  * Returns `{ payload, bytes }`. `bytes` is the resulting package when the batch changed it and is
  * safe to commit, otherwise `null`. A payload with `status: "error"` must be surfaced as a failure.
  */
-export async function applyOperationsToPackage(session, operations, settings = {}) {
+export async function applyOperationsToPackage(session, requestedOperations, settings = {}) {
   const author = settings.author || DEFAULT_AUTHOR;
   const options = resolveApplyOptions(settings.options);
   const document = await openSessionDocument(session);
@@ -310,6 +306,12 @@ export async function applyOperationsToPackage(session, operations, settings = {
   if (mismatch) {
     return { payload: { ...mismatch, effectiveOptions: options }, bytes: null };
   }
+
+  // Handles and other request shorthands are resolved against the document being edited, so they
+  // are checked against the same revision the edit runs on.
+  const operations = typeof settings.prepare === "function"
+    ? settings.prepare(document)
+    : requestedOperations;
 
   preprocessOperations(document, operations);
 
@@ -374,7 +376,7 @@ export async function applyOperationsToPackage(session, operations, settings = {
 
   const payload = {
     status,
-    complete: completedAll,
+    completion: completedAll,
     hasChanges: status === "error" ? false : hasChanges,
     ...(status === "error" ? { rolledBack: true } : rolledBack ? { rolledBack } : {}),
     effectiveOptions: { author, ...options },
@@ -391,23 +393,60 @@ export async function applyOperationsToPackage(session, operations, settings = {
     packageRevision: status === "error" ? startingRevision : document.getRevisionToken()
   };
 
-  if (status === "error" && !payload.error) {
-    const failedResult = results.find(result => result.status === "error");
-    if (failedResult?.error) payload.error = failedResult.error;
+  if (failed) {
+    const actionable = chooseActionableError(results, topLevelError);
+    if (actionable) payload.error = actionable;
+  }
+
+  if (typeof settings.afterApply === "function" && status !== "error") {
+    Object.assign(payload, settings.afterApply(document, payload, operations) || {});
   }
 
   return { payload, bytes: finalBytes };
+}
+
+const COMMENT_BOUNDARY = /crosses a tracked (insertion|deletion) boundary/;
+
+/**
+ * Word commonly refuses packages whose comment range crosses a tracked change, so those are
+ * refused here. The usual cause is a comment whose default anchor (the whole paragraph) now
+ * contains a change, which the agent can fix by anchoring to unchanged text.
+ */
+function packageValidationError(error) {
+  const crossesRevision = COMMENT_BOUNDARY.test(error.message);
+  return {
+    code: crossesRevision ? "COMMENT_ANCHOR_CROSSES_REVISION" : "PACKAGE_VALIDATION_FAILED",
+    message: crossesRevision
+      ? `${error.message} Anchor the comment to text outside the changed span (comment.anchorText / textToComment).`
+      : error.message,
+    recovery: {
+      action: "change_request",
+      requiresReinspection: false,
+      requiresUserAuthorization: false,
+      sameArgumentsSafe: false
+    }
+  };
 }
 
 /**
  * Applies operations to the session, committing only if the whole result validates. Throws
  * `OperationFailedError` (with a structured `payload`) on failure; the session is left untouched.
  */
-export async function applyOperationsToSession({ session, store, operations, author, options, expectedRevision }) {
+export async function applyOperationsToSession({
+  session,
+  operations,
+  author,
+  options,
+  expectedRevision,
+  prepare,
+  afterApply
+}) {
   const { payload, bytes } = await applyOperationsToPackage(session, operations, {
     author,
     options,
-    expectedRevision
+    expectedRevision,
+    prepare,
+    afterApply
   });
 
   if (payload.status === "error") {
@@ -423,19 +462,10 @@ export async function applyOperationsToSession({ session, store, operations, aut
       throw new OperationFailedError(error.message, {
         ...payload,
         status: "error",
-        complete: false,
+        completion: false,
         hasChanges: false,
         rolledBack: true,
-        error: {
-          code: "PACKAGE_VALIDATION_FAILED",
-          message: error.message,
-          recovery: {
-            action: "change_request",
-            requiresReinspection: true,
-            requiresUserAuthorization: false,
-            sameArgumentsSafe: false
-          }
-        }
+        error: packageValidationError(error)
       });
     }
   }
